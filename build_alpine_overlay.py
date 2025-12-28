@@ -1,29 +1,22 @@
 #!/usr/bin/env python3
 """
-    This utility creates an Alpine Linux overlay tarball in an ISO to help with automated headless
+    This utility creates an Alpine Linux overlay tarball inside an ISO to bootstrap automated headless
     installs.
 
-    I wouldn't have been able to do this without the help of Copilot, however the code has been 
-    significantly improved over the original suggestions with the aim being the absolute minimal
-    script and answerfile to get the job done.  It's expected that either Ansible or some other 
-    config management tools will be used post-install to do the bulk of the system configuration.
-    All this tries to deliver is passwordless ssh access to a running system.
-
-    I have tested this only on Proxmox but it should work on any virtualization platform that supports
-    multiple CD-ROM drives.  It's possible to put the overlay on a floppy image or USB stick but
-    these options make things more complicated for Proxmox because it has convenient special treatment
-    for ISO images (the ISO store).   I haven't tested this but I believe Alpine will mount any 
-    removable media and extract the overlay tarball so long as it's named correctly.  Try it on a 
-    second USB stick for headless hardware installs from boot.
-
     Requires:
-    - python3 (base install will be good enough, no VENVs or additional packages needed)
-    - mkisofs ('brew install cdrtools' on Macos, or use your distro's package manager for Linux)
+    - python3
+    - mkisofs ('brew install cdrtools' on Macos)
     - Pub/priv keypair in ~/.ssh 
 
     Usage example:
-    ./build_alpine_overlay.py --hostname myalpine --out myalpine_apkovl.iso
+    ./build_alpine_overlay.py --hostname foo --iso foo_apkovl.iso
 
+    Next create a VM with two CD-ROM ISOs connected:
+    - alpine-standard-3.23.2-x86_64.iso
+    - foo_apkovl.iso
+
+    The VM will then boot from the install ISO, which in turn runs code to find the akpovl ISO, extracts it
+    and runs the installer automatically.  The VM will power off when complete.
 """
 
 import os
@@ -35,6 +28,13 @@ from pathlib import Path
 from subprocess import run, CalledProcessError
 import shutil
 from io import StringIO
+
+
+DEFAULT_TARBALL = "alpine.apkovl.tar.gz"
+DEFAULT_ISO = "apkovl.iso"
+DEFAULT_DISK = "/dev/sda"
+DEFAULT_TIMEZONE = "GMT"
+DEFAULT_KEYMAP = "us us"
 
 
 # OpenRC service template for unattended setup-alpine
@@ -165,11 +165,11 @@ def build_answers(args) -> str:
     return ANSWERS_TEMPLATE % vars(args)
 
 
-def create_overlay_tar(out_path: str, args):
+def create_overlay_tar(args):
     autosetup_content = AUTOS_SETUP_TEMPLATE % vars(args)
     answers_txt = build_answers(args)
 
-    with OverlayTar(out_path) as ovl:
+    with OverlayTar(args.tar) as ovl:
         # Minimal OpenRC autosetup service to run installer once
         ovl.file("etc/init.d/autosetup", autosetup_content, 0o755)
         # Enable autosetup at default runlevel (absolute target for busybox tar)
@@ -201,21 +201,24 @@ def build_iso(tarball_name: str, dest_iso: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Build headless Alpine overlay ISO (apkovl inside)")
-    parser.add_argument("--hostname", required=True, help="Target hostname")
-    parser.add_argument("--out", default="apkovl.iso", help="Output ISO path suffix")
-    parser.add_argument("--disk", default="/dev/sda", help="Install disk device (e.g., /dev/sda or /dev/vda)")
-    parser.add_argument("--timezone", default="GMT", help="Timezone (under /usr/share/zoneinfo)")
-    parser.add_argument("--keymap", default="us us", help="Keymap layout and variant (e.g., 'us us' or 'none')")
+    parser.add_argument("--hostname", required=True, help="Target hostname (required)")
+    parser.add_argument("--tar", default=DEFAULT_TARBALL, help=f"tarball to create (default {DEFAULT_TARBALL})")
+    parser.add_argument("--iso", default=DEFAULT_ISO, help=f"Output ISO path (default {DEFAULT_ISO})")
+    parser.add_argument("--disk", default=DEFAULT_DISK, help=f"Install disk device (default {DEFAULT_DISK})")
+    parser.add_argument("--timezone", default=DEFAULT_TIMEZONE, help=f"Timezone (default {DEFAULT_TIMEZONE})")
+    parser.add_argument("--keymap", default=DEFAULT_KEYMAP, help=f"Keymap layout and variant (default {DEFAULT_KEYMAP})")
     parser.add_argument("--devdopts", default=None, help="Device manager option (e.g., 'mdev' or 'none'); default 'mdev' if omitted")
     parser.add_argument("--interfaces", default=None, help="Full /etc/network/interfaces content; default DHCP template if omitted")
-    # Hardcoded inner filename expected by headless Alpine discovery
-    tarball_name = "alpine.apkovl.tar.gz"
 
     args = parser.parse_args()
-    dest_iso = Path(args.hostname + '_' + args.out)
 
-    create_overlay_tar(tarball_name, args)
-    build_iso(tarball_name, dest_iso)
+    for file_name in [args.tar, args.iso]:
+        if os.path.exists(file_name):
+            print(f"Error: Output file {file_name} already exists; please remove it first.", file=sys.stderr)
+            sys.exit(1)
+
+    create_overlay_tar(args)
+    build_iso(args.tar, args.iso)
 
 
 if __name__ == "__main__":
