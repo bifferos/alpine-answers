@@ -41,8 +41,8 @@ Test Setup
 ==========
 
 Here's a typical Proxmox setup for testing the generated ISO.  The script
-`test.py` is used for trying out new Alpine versions, it will create VM
-like the one below.
+`test.sh` is used for trying out new Alpine versions, it will create VM
+like the one below.  It uses my pvectl utility to provision a VM on Proxmox.
 
 ![Screenshot](test-setup.png)
 
