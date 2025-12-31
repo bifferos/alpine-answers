@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+Alpine ISO helper: by default prints the latest standard x86_64 ISO filename
+to stdout and exits quickly. With --fetch/-f, downloads the ISO into an
+output directory and verifies checksum.
+
+Usage:
+    # Print filename only (default)
+    python3 alpine_latest.py
+
+    # Download into current directory
+    python3 alpine_latest.py --fetch
+
+    # Choose output directory when downloading
+    python3 alpine_latest.py -f --dir /tmp
+
+Outputs:
+    - Always prints the ISO filename to stdout.
+    - Progress and diagnostics go to stderr when downloading.
+"""
+
+import argparse
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+import requests
+import urllib3
+
+# Disable insecure request warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def get_latest_alpine_iso_info() -> tuple[str, str]:
+    """Scrape Alpine downloads page to find the latest standard x86_64 ISO.
+    Returns (iso_name, version).
+    """
+    url = "https://www.alpinelinux.org/downloads/"
+    resp = requests.get(url)
+    resp.raise_for_status()
+    for line in resp.text.splitlines():
+        m = re.search(r"alpine-standard-([0-9\.]+)-x86_64\.iso", line)
+        if m:
+            version = m.group(1)
+            iso_name = f"alpine-standard-{version}-x86_64.iso"
+            return iso_name, version
+    raise RuntimeError("Failed to determine latest Alpine ISO name")
+
+
+def _short_version_from_iso_name(iso_name: str) -> str:
+    m = re.match(r"alpine-standard-([0-9]+\.[0-9]+).*-x86_64\.iso", iso_name)
+    if not m:
+        raise ValueError(f"Cannot derive short version from iso name: {iso_name}")
+    return m.group(1)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_iso(iso_name: str, output_dir: Path) -> Path:
+    """Download the ISO to output_dir, verifying checksum via .sha256.
+    If the file exists and checksum matches, keeps it; else re-downloads.
+    Returns the path to the downloaded (or verified) ISO file.
+    """
+    short_ver = _short_version_from_iso_name(iso_name)
+    base = f"https://dl-cdn.alpinelinux.org/alpine/v{short_ver}/releases/x86_64/{iso_name}"
+    sha_url = f"{base}.sha256"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    iso_path = output_dir / iso_name
+
+    # Fetch expected sha256
+    resp = requests.get(sha_url)
+    resp.raise_for_status()
+    expected = resp.text.split()[0]
+    print(f"expected sha256: {expected}", file=sys.stderr)
+
+    # Verify existing file
+    if iso_path.exists():
+        actual = _sha256_file(iso_path)
+        if actual == expected:
+            print(f"Checksum OK for {iso_name}", file=sys.stderr)
+            return iso_path
+        print(f"Checksum mismatch for {iso_name}; re-downloading", file=sys.stderr)
+        iso_path.unlink(missing_ok=True)
+
+    # Download
+    print(f"Downloading {iso_name}...", file=sys.stderr)
+    r = requests.get(base, stream=True)
+    r.raise_for_status()
+    with open(iso_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=1024 * 256):
+            if chunk:
+                f.write(chunk)
+    # Verify
+    actual = _sha256_file(iso_path)
+    print(f"actual sha256: {actual}", file=sys.stderr)
+    if actual != expected:
+        iso_path.unlink(missing_ok=True)
+        raise RuntimeError("Downloaded ISO checksum mismatch")
+    return iso_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Print latest Alpine ISO name or fetch it")
+    parser.add_argument("--dir", default=".", help="Output directory for fetch (default: .)")
+    parser.add_argument("--fetch", "-f", action="store_true", help="Fetch (download) the ISO into --dir (default prints name only)")
+    args = parser.parse_args(argv)
+
+    try:
+        iso_name, _ver = get_latest_alpine_iso_info()
+    except Exception as e:
+        print(f"alpine_latest: discover failed: {e}", file=sys.stderr)
+        return 2
+
+    if not args.fetch:
+        print(iso_name)
+        return 0
+
+    # Download into dir
+    outdir = Path(str(args.dir))
+    try:
+        path = download_iso(iso_name, outdir)
+    except Exception as e:
+        print(f"alpine_latest: download failed: {e}", file=sys.stderr)
+        return 2
+    print(path.name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
